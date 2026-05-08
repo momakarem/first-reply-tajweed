@@ -1,0 +1,4 @@
+# ── Core ─────────────────────────────────────────────────────────────────────
+telethon>=1.36.0            # Userbot (personal account MTProto client)
+python-telegram-bot>=21.0   # Control bot (Bot API, async)
+python-dotenv>=1.0.0        # .env loader

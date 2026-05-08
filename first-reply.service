@@ -1,0 +1,25 @@
+[Unit]
+Description=First Reply Tajweed - Telegram Auto-Reply
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+User=deploy
+WorkingDirectory=/opt/first-reply
+ExecStart=/opt/first-reply/.venv/bin/python main.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+# ── Security hardening ───────────────────────────────────────────────────────
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/first-reply/sessions /opt/first-reply/first_reply.log
+
+[Install]
+WantedBy=multi-user.target

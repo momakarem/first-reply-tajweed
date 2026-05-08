@@ -1,0 +1,39 @@
+# ── Runtime ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+
+# ── Sessions (mounted as volume — never bake into image) ─────────────────────
+sessions/
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+*.session
+*.session-journal
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+
+# ── VCS / IDE ─────────────────────────────────────────────────────────────────
+.git/
+.gitignore
+.vscode/
+.idea/
+
+# ── Virtualenvs ──────────────────────────────────────────────────────────────
+.venv/
+venv/
+
+# ── Docs (not needed in image) ────────────────────────────────────────────────
+README.md
+DEPLOYMENT.md
+LICENSE
+*.md
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# ── Systemd (not used in Docker) ──────────────────────────────────────────────
+*.service

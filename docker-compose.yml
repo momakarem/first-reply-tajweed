@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  first-reply:
+    build: .
+    container_name: first-reply-tajweed
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - sessions_data:/app/sessions
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  sessions_data:
+    driver: local
