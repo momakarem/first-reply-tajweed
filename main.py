@@ -171,6 +171,17 @@ async def _try_recover_state(notify_cb) -> None:
 async def _run_control_bot(app) -> None:
     await app.initialize()
     await app.start()
+    # Register slash commands AFTER bot is fully started
+    try:
+        from telegram import BotCommand
+        await app.bot.set_my_commands([
+            BotCommand("arm", "Arm monitoring — e.g. /arm 11:15"),
+            BotCommand("stop", "Stop current monitoring"),
+            BotCommand("status", "Show current status"),
+        ])
+        log.info("Slash command menu registered successfully")
+    except Exception as exc:
+        log.error("FAILED to register slash commands: %s", exc)
     log.info("Control bot started — polling for updates.")
     try:
         await app.updater.start_polling(
