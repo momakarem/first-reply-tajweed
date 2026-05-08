@@ -1,47 +1,35 @@
 """
-create_session.py — Interactive Telethon session creator.
+create_session.py — Generate a Telethon StringSession.
 
-Run this LOCALLY (not in Docker) to authenticate your Telegram account
-and create the session file. Then upload sessions/userbot.session to
-your EasyPanel volume.
+Run LOCALLY, then paste the output as TELETHON_SESSION env var in EasyPanel.
 
-Usage:
-    python create_session.py
+Usage: python create_session.py
 """
-
-import asyncio
-import os
-import sys
-
+import asyncio, os, sys
 from dotenv import load_dotenv
+from telethon import TelegramClient
+from telethon.sessions import StringSession
 
 load_dotenv()
-
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 PHONE = os.environ.get("PHONE", "")
-SESSION_PATH = os.environ.get("USERBOT_SESSION", "sessions/userbot")
 
 if not all([API_ID, API_HASH, PHONE]):
-    print("ERROR: Set API_ID, API_HASH, PHONE in .env first")
-    sys.exit(1)
-
+    print("ERROR: Set API_ID, API_HASH, PHONE in .env first"); sys.exit(1)
 
 async def main():
-    from telethon import TelegramClient
-
-    os.makedirs(os.path.dirname(SESSION_PATH) or ".", exist_ok=True)
-
-    client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
+    print("Creating Telethon StringSession…\n")
+    client = TelegramClient(StringSession(), API_ID, API_HASH)
     await client.start(phone=PHONE)
-
     me = await client.get_me()
-    print(f"\n✅ Authenticated as: {me.first_name} (id={me.id})")
-    print(f"📁 Session saved to: {SESSION_PATH}.session")
-    print(f"\nUpload this file to your EasyPanel volume at /app/sessions/")
-
+    s = client.session.save()
+    print(f"\n✅ Authenticated as: {me.first_name} (id={me.id})\n")
+    print("Copy this string → paste as TELETHON_SESSION in EasyPanel:\n")
+    print("─" * 60)
+    print(s)
+    print("─" * 60)
     await client.disconnect()
-
 
 if __name__ == "__main__":
     asyncio.run(main())
