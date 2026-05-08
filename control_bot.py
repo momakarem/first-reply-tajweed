@@ -13,7 +13,10 @@ import time
 from datetime import datetime, timedelta
 
 from telegram import BotCommand, Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application, CommandHandler, ConversationHandler,
+    ContextTypes, MessageHandler, filters,
+)
 
 import config
 from scheduler import arm_scheduler
@@ -135,27 +138,22 @@ def _parse_time(raw: str) -> datetime | None:
     return cand
 
 
-# ── Command handlers ──────────────────────────────────────────────────────────
+# ── Conversation state ────────────────────────────────────────────────────────
+WAITING_TIME = 1
 
-@_owner_only
-async def cmd_arm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    args = ctx.args
-    if not args:
-        await update.message.reply_text(
-            "📋 Usage: /arm HH:MM\n\n"
-            "Examples:\n"
-            "  /arm 11:15\n"
-            "  /arm 11:15pm")
-        return
 
-    target_dt = _parse_time(args[0])
+# ── Arm helpers ───────────────────────────────────────────────────────────────
+
+async def _do_arm(update: Update, ctx: ContextTypes.DEFAULT_TYPE, time_str: str):
+    """Shared arming logic used by both direct /arm HH:MM and conversation flow."""
+    target_dt = _parse_time(time_str)
     if target_dt is None:
         await update.message.reply_text(
-            f"❌ Invalid time format: `{args[0]}`\n\n"
+            f"❌ Invalid time: `{time_str}`\n\n"
             "Use HH:MM format, e.g.:\n"
-            "  /arm 11:15\n"
-            "  /arm 11:15pm")
-        return
+            "  11:15\n"
+            "  11:15pm")
+        return ConversationHandler.END
 
     old_note = ""
     if state.scheduled_dt:
@@ -181,6 +179,38 @@ async def cmd_arm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🕐 Scheduled: {target_dt.strftime('%Y-%m-%d %H:%M')} Cairo\n"
         f"📡 Window: {open_dt.strftime('%H:%M')} – {close_dt.strftime('%H:%M')}\n"
         f"💬 Reply text: {state.reply_text}")
+    return ConversationHandler.END
+
+
+# ── Command handlers ──────────────────────────────────────────────────────────
+
+@_owner_only
+async def cmd_arm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    args = ctx.args
+    if not args:
+        # No time provided → ask for it
+        await update.message.reply_text(
+            "🕐 Write the time\n\n"
+            "Example:\n"
+            "  11:15\n"
+            "  11:15pm")
+        return WAITING_TIME
+
+    # Time provided directly → arm immediately
+    return await _do_arm(update, ctx, args[0])
+
+
+@_owner_only
+async def _arm_receive_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handles the time message after /arm was sent without args."""
+    time_str = update.message.text.strip()
+    return await _do_arm(update, ctx, time_str)
+
+
+async def _arm_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Cancel the conversation."""
+    await update.message.reply_text("❌ Cancelled.")
+    return ConversationHandler.END
 
 
 @_owner_only
@@ -209,9 +239,23 @@ def build_control_bot() -> Application:
         .build()
     )
     if not _handlers_registered:
-        app.add_handler(CommandHandler("arm", cmd_arm))
+        arm_conv = ConversationHandler(
+            entry_points=[CommandHandler("arm", cmd_arm)],
+            states={
+                WAITING_TIME: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, _arm_receive_time),
+                ],
+            },
+            fallbacks=[
+                CommandHandler("stop", _arm_cancel),
+                CommandHandler("arm", cmd_arm),
+            ],
+            conversation_timeout=60,
+        )
+        app.add_handler(arm_conv)
         app.add_handler(CommandHandler("stop", cmd_stop))
         app.add_handler(CommandHandler("status", cmd_status))
         _handlers_registered = True
         log.info("Control bot configured with /arm /stop /status")
     return app
+
