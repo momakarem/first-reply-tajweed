@@ -5,13 +5,22 @@ Performance notes:
   - The handler does the minimum possible work before firing the reply.
   - Target chat entity is resolved ONCE at startup (no per-message lookup).
   - No logging on the hot path — every microsecond counts.
+
+Docker notes:
+  - If a valid session file exists, connects without interactive login.
+  - Handles FloodWaitError by sleeping instead of crash-looping.
+  - Exits with clear instructions if no session and no TTY available.
 """
 
+import asyncio
 import logging
+import os
+import sys
 import time
 from datetime import datetime
 
 from telethon import TelegramClient, events
+from telethon.errors import FloodWaitError
 from telethon.tl.types import MessageMediaPhoto
 
 import config
@@ -28,6 +37,23 @@ def get_client() -> TelegramClient:
     return _client
 
 
+def _session_exists() -> bool:
+    """Check if a Telethon session file already exists."""
+    session_path = config.USERBOT_SESSION
+    return (
+        os.path.exists(session_path + ".session")
+        or os.path.exists(session_path)
+    )
+
+
+def _is_interactive() -> bool:
+    """Check if stdin is available (TTY) for interactive login."""
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
+
+
 async def build_userbot(notify_cb=None) -> TelegramClient:
     global _client, _target_entity, _notify_cb
     _notify_cb = notify_cb
@@ -38,10 +64,48 @@ async def build_userbot(notify_cb=None) -> TelegramClient:
         config.API_HASH,
         connection_retries=-1,
         auto_reconnect=True,
-        flood_sleep_threshold=60,
+        flood_sleep_threshold=300,
     )
 
-    await _client.start(phone=config.PHONE)
+    if _session_exists():
+        # Session file found — connect without interactive login
+        log.info("Session file found, connecting with existing session…")
+        await _client.connect()
+
+        if not await _client.is_user_authorized():
+            log.error(
+                "Session file exists but is NOT authorized. "
+                "Run create_session.py locally to re-authenticate."
+            )
+            raise RuntimeError("Session expired — re-run create_session.py")
+    else:
+        # No session — need interactive login
+        if not _is_interactive():
+            log.error(
+                "═══════════════════════════════════════════════════\n"
+                "  No session file found and no interactive terminal.\n"
+                "  Run create_session.py locally first:\n"
+                "    python create_session.py\n"
+                "  Then copy sessions/userbot.session to the container volume.\n"
+                "═══════════════════════════════════════════════════"
+            )
+            raise RuntimeError(
+                "No session file. Run create_session.py locally first."
+            )
+
+        # Interactive mode — handle FloodWait gracefully
+        log.info("No session file — starting interactive login…")
+        try:
+            await _client.start(phone=config.PHONE)
+        except FloodWaitError as e:
+            wait = e.seconds
+            log.warning(
+                "Telegram FloodWait: must wait %d seconds (%.1f min). Sleeping…",
+                wait, wait / 60,
+            )
+            await asyncio.sleep(wait + 5)
+            await _client.start(phone=config.PHONE)
+
     me = await _client.get_me()
     log.info("Userbot connected as %s (id=%s)", me.first_name, me.id)
 
