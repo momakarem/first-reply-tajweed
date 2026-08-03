@@ -119,19 +119,28 @@ async def build_userbot(
         log.info("Using file-based session: %s", config.USERBOT_SESSION)
         _client = _create_client(config.USERBOT_SESSION)
 
-        # Build start() kwargs — only pass callbacks if provided
-        start_kwargs = {"phone": config.PHONE}
-        if code_callback is not None:
-            start_kwargs["code_callback"] = code_callback
-        if password_callback is not None:
-            start_kwargs["password"] = password_callback
+        # Connect first and check if session is still valid.
+        # Only trigger the full login flow (start) if not authorized.
+        # This avoids sending a new verification code every restart.
+        await _client.connect()
 
-        try:
-            await _client.start(**start_kwargs)
-        except FloodWaitError as e:
-            log.warning("FloodWait %ds — sleeping…", e.seconds)
-            await asyncio.sleep(e.seconds + 5)
-            await _client.start(**start_kwargs)
+        if await _client.is_user_authorized():
+            log.info("Existing session is valid — skipping login.")
+        else:
+            log.info("Session not authorized — starting login flow…")
+            # Build start() kwargs — only pass callbacks if provided
+            start_kwargs = {"phone": config.PHONE}
+            if code_callback is not None:
+                start_kwargs["code_callback"] = code_callback
+            if password_callback is not None:
+                start_kwargs["password"] = password_callback
+
+            try:
+                await _client.start(**start_kwargs)
+            except FloodWaitError as e:
+                log.warning("FloodWait %ds — sleeping…", e.seconds)
+                await asyncio.sleep(e.seconds + 5)
+                await _client.start(**start_kwargs)
 
     me = await _client.get_me()
     log.info(
