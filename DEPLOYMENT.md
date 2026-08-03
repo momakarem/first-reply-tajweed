@@ -1,5 +1,9 @@
 # EasyPanel Deployment Guide
 
+
+امر التشغيل: >>>  python main.py
+
+
 Step-by-step guide to deploy First Reply Tajweed on EasyPanel.
 
 ## 1. Create the Service

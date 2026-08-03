@@ -37,18 +37,33 @@ try:
 except KeyError as exc:
     sys.exit(f"FATAL: Missing required env var: {exc}")
 
-# ── Target chat ──────────────────────────────────────────────────────────────
-# Username (e.g. "@mygroup") or numeric id (e.g. "-1001234567890")
-try:
-    TARGET_CHAT: str = os.environ["TARGET_CHAT"]
-except KeyError:
-    sys.exit("FATAL: Missing required env var: 'TARGET_CHAT'")
+# ── Target groups (loaded dynamically from .env) ─────────────────────────────
+# Supports up to 10 groups: GROUP_1_NAME/GROUP_1_ID … GROUP_10_NAME/GROUP_10_ID
+GROUPS: list[dict] = []
+for _i in range(1, 11):
+    _name = os.getenv(f"GROUP_{_i}_NAME", "").strip()
+    _gid  = os.getenv(f"GROUP_{_i}_ID", "").strip()
+    if _name and _gid:
+        GROUPS.append({"name": _name, "id": _gid})
+
+if not GROUPS:
+    # Fallback: try legacy TARGET_CHAT env var
+    _legacy = os.getenv("TARGET_CHAT", "").strip()
+    if _legacy:
+        GROUPS.append({"name": "Default Group", "id": _legacy})
+    else:
+        sys.exit("FATAL: No groups configured. Set GROUP_1_NAME/GROUP_1_ID in .env")
+
+# Default target (first group) — used as fallback
+TARGET_CHAT: str = GROUPS[0]["id"]
 
 # ── Default reply text ────────────────────────────────────────────────────────
 DEFAULT_REPLY_TEXT: str = os.getenv("DEFAULT_REPLY_TEXT", "مروة محروس 17")
 
 # ── Timing window (minutes) ───────────────────────────────────────────────────
-PRE_WINDOW_MINUTES: int  = int(os.getenv("PRE_WINDOW_MINUTES", "3"))
+# NOTE: Stealth mode uses seconds internally (120s pre, 180s post).
+# These values are kept for status display & crash recovery compatibility.
+PRE_WINDOW_MINUTES: int  = int(os.getenv("PRE_WINDOW_MINUTES", "2"))
 POST_WINDOW_MINUTES: int = int(os.getenv("POST_WINDOW_MINUTES", "3"))
 
 # ── Session files ─────────────────────────────────────────────────────────────
@@ -76,9 +91,11 @@ CAPTION_KEYWORD: str = os.getenv("CAPTION_KEYWORD", "").strip().lower()
 # ── Sensitive values — never log these ────────────────────────────────────────
 _SENSITIVE_VALUES = frozenset(filter(None, [API_HASH, BOT_TOKEN]))
 
-# ── Session directory permission check (Linux only) ──────────────────────────
+# ── Session directory permission check (Linux/macOS only) ─────────────────────
 def _check_session_dir_permissions() -> None:
     """Warn if sessions/ directory is world-readable (Linux/macOS only)."""
+    if sys.platform == "win32":
+        return  # chmod not applicable on Windows
     session_dir = os.path.dirname(USERBOT_SESSION)
     if not session_dir or not os.path.isdir(session_dir):
         return

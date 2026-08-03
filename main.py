@@ -12,7 +12,11 @@ import os
 import re
 import signal
 import sys
+import warnings
 from datetime import datetime, timedelta
+
+# Suppress python-telegram-bot internal warnings
+warnings.filterwarnings("ignore", category=UserWarning, module=r"telegram\.")
 
 os.makedirs("sessions", exist_ok=True)
 
@@ -58,7 +62,7 @@ logging.basicConfig(
 # Apply redaction filter to root logger
 logging.getLogger().addFilter(_RedactFilter())
 
-for name in ("telethon", "httpx", "httpcore", "telegram"):
+for name in ("telethon", "httpx", "httpcore", "telegram", "apscheduler"):
     logging.getLogger(name).setLevel(logging.WARNING)
 
 log = logging.getLogger("main")
@@ -85,6 +89,8 @@ async def _try_recover_state(notify_cb) -> None:
         scheduled_dt = datetime.fromisoformat(saved["scheduled_dt"])
         reply_sent = bool(saved.get("reply_sent", False))
         reply_text = saved.get("reply_text", config.DEFAULT_REPLY_TEXT)
+        group_id = saved.get("group_id", "")
+        group_name = saved.get("group_name", "")
     except (ValueError, KeyError) as exc:
         log.warning("Invalid saved state, clearing: %s", exc)
         persistent_state.clear_state()
@@ -99,6 +105,9 @@ async def _try_recover_state(notify_cb) -> None:
     if now < open_dt:
         # Future schedule — re-arm
         state.reply_text = reply_text
+        if group_id:
+            state.selected_group_id = group_id
+            state.selected_group_name = group_name
         arm_scheduler(scheduled_dt, notify_cb=notify_cb)
         state.recovered_from_disk = True
         recovery_msg = (
@@ -112,6 +121,9 @@ async def _try_recover_state(notify_cb) -> None:
         state.scheduled_dt = scheduled_dt
         state.reply_text = reply_text
         state.reply_sent = False
+        if group_id:
+            state.selected_group_id = group_id
+            state.selected_group_name = group_name
         state.activate_monitoring()
         state.recovered_from_disk = True
 
@@ -186,7 +198,7 @@ async def _run_control_bot(app) -> None:
     try:
         await app.updater.start_polling(
             drop_pending_updates=True,
-            allowed_updates=["message"],
+            allowed_updates=["message", "callback_query"],
         )
         while True:
             await asyncio.sleep(3600)
@@ -230,10 +242,10 @@ async def _async_main() -> None:
     await _try_recover_state(notify_cb=_notify)
 
     # ── Launch tasks ─────────────────────────────────────────────────────
+    # Control bot is the ONLY persistent task. It runs forever.
+    # The userbot connects/disconnects per arm cycle (managed by scheduler).
     control_task = asyncio.create_task(
         _run_control_bot(control_app), name="control_bot")
-    userbot_task = asyncio.create_task(
-        userbot_client.run_until_disconnected(), name="userbot")
 
     shutdown_event = asyncio.Event()
 
@@ -247,16 +259,15 @@ async def _async_main() -> None:
         except NotImplementedError:
             pass
 
-    log.info(">>> First-Reply system running.")
+    log.info(">>> First-Reply system running (persistent service mode).")
     try:
         await shutdown_event.wait()
     except asyncio.CancelledError:
         pass
     finally:
         control_task.cancel()
-        userbot_task.cancel()
-        await asyncio.gather(
-            control_task, userbot_task, return_exceptions=True)
+        state.cancel_arm_tasks()
+        await asyncio.gather(control_task, return_exceptions=True)
         await userbot_client.disconnect()
         log.info("Bye!")
 

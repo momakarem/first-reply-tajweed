@@ -26,6 +26,8 @@ def save_state(
     scheduled_dt: Optional[datetime],
     reply_text: str,
     reply_sent: bool,
+    group_id: str = "",
+    group_name: str = "",
 ) -> None:
     """
     Persist current armed state to disk atomically.
@@ -40,6 +42,8 @@ def save_state(
         "scheduled_dt": scheduled_dt.isoformat(),
         "reply_text": reply_text,
         "reply_sent": reply_sent,
+        "group_id": group_id,
+        "group_name": group_name,
         "saved_at": datetime.now(tz=config.CAIRO_TZ).isoformat(),
     }
 
