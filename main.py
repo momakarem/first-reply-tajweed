@@ -313,6 +313,13 @@ async def _async_main() -> None:
         await control_app.shutdown()
         return
 
+    # ── Step 4b: Disconnect userbot — only scheduler reconnects it ─────
+    # The userbot must NOT stay connected 24/7 (ban risk).
+    # The scheduler will call reconnect_userbot() at T-120s before armed time.
+    # Event handlers persist across disconnects — no re-registration needed.
+    await userbot_client.disconnect()
+    log.info("Userbot disconnected after checks — scheduler will reconnect when needed.")
+
     # ── Step 5: Crash recovery ────────────────────────────────────────────
     await _try_recover_state(notify_cb=_notify)
 
