@@ -181,25 +181,8 @@ async def _try_recover_state(notify_cb) -> None:
 # ── Control bot runner ────────────────────────────────────────────────────────
 
 async def _run_control_bot(app) -> None:
-    await app.initialize()
-    await app.start()
-    # Register slash commands AFTER bot is fully started
+    """Keep the control bot alive. Bot is already initialized and polling."""
     try:
-        from telegram import BotCommand
-        await app.bot.set_my_commands([
-            BotCommand("arm", "Arm monitoring — e.g. /arm 11:15"),
-            BotCommand("stop", "Stop current monitoring"),
-            BotCommand("status", "Show current status"),
-        ])
-        log.info("Slash command menu registered successfully")
-    except Exception as exc:
-        log.error("FAILED to register slash commands: %s", exc)
-    log.info("Control bot started — polling for updates.")
-    try:
-        await app.updater.start_polling(
-            drop_pending_updates=True,
-            allowed_updates=["message", "callback_query"],
-        )
         while True:
             await asyncio.sleep(3600)
     except asyncio.CancelledError:
@@ -217,6 +200,15 @@ async def _async_main() -> None:
     loop = asyncio.get_running_loop()
     control_app = build_control_bot()
 
+    # ── Step 1: Start Control Bot FIRST (so it can send/receive messages) ──
+    await control_app.initialize()
+    await control_app.start()
+    await control_app.updater.start_polling(
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"],
+    )
+    log.info("Control bot started — polling for updates.")
+
     async def _notify(text: str):
         try:
             await control_app.bot.send_message(
@@ -224,10 +216,82 @@ async def _async_main() -> None:
         except Exception as exc:
             log.warning("Notify failed: %s", exc)
 
-    userbot_client = await build_userbot(notify_cb=_notify)
-    log.info("Userbot ready.")
+    # ── Step 2: Build Telegram-based verification callbacks ───────────────
+    # Future that will hold the owner's reply (code or password)
+    _pending_future: asyncio.Future | None = None
 
-    # ── Startup checks ───────────────────────────────────────────────────
+    async def _verification_reply_handler(update, context):
+        """Temporary handler: captures owner's text reply during login."""
+        nonlocal _pending_future
+        if update.message is None or update.effective_user is None:
+            return
+        if update.effective_user.id != config.OWNER_ID:
+            return
+        if _pending_future is not None and not _pending_future.done():
+            _pending_future.set_result(update.message.text.strip())
+
+    # Register temporary handler (group=-1 so it runs before other handlers)
+    from telegram.ext import MessageHandler, filters
+    temp_handler = MessageHandler(
+        filters.TEXT & ~filters.COMMAND, _verification_reply_handler
+    )
+    control_app.add_handler(temp_handler, group=-1)
+
+    async def code_callback():
+        """Ask owner for verification code via Telegram, wait for reply."""
+        nonlocal _pending_future
+        _pending_future = loop.create_future()
+        await _notify(
+            "🔐 كود التحقق مطلوب!\n\n"
+            "تليجرام بعتلك كود تحقق.\n"
+            "ابعت الكود هنا 👇"
+        )
+        log.info("Verification code requested via Telegram — waiting for owner reply…")
+        code = await asyncio.wait_for(_pending_future, timeout=300)
+        log.info("Verification code received from owner.")
+        return code
+
+    async def password_callback():
+        """Ask owner for 2FA password via Telegram, wait for reply."""
+        nonlocal _pending_future
+        _pending_future = loop.create_future()
+        await _notify(
+            "🔑 كلمة سر التحقق بخطوتين (2FA) مطلوبة!\n\n"
+            "ابعت الباسورد هنا 👇"
+        )
+        log.info("2FA password requested via Telegram — waiting for owner reply…")
+        password = await asyncio.wait_for(_pending_future, timeout=300)
+        log.info("2FA password received from owner.")
+        return password
+
+    # ── Step 3: Build userbot (may trigger code/password callbacks) ────────
+    try:
+        userbot_client = await build_userbot(
+            notify_cb=_notify,
+            code_callback=code_callback,
+            password_callback=password_callback,
+        )
+        log.info("Userbot ready.")
+    except asyncio.TimeoutError:
+        log.error("Login timed out — owner did not reply within 5 minutes.")
+        await _notify("❌ انتهت المهلة! ما ردتش بالكود خلال 5 دقايق.\nشغّل البوت تاني.")
+        await control_app.updater.stop()
+        await control_app.stop()
+        await control_app.shutdown()
+        return
+    except Exception as exc:
+        log.error("Userbot login FAILED: %s", exc)
+        await _notify(f"❌ فشل تسجيل الدخول:\n{exc}")
+        await control_app.updater.stop()
+        await control_app.stop()
+        await control_app.shutdown()
+        return
+    finally:
+        # Remove temporary verification handler — no longer needed
+        control_app.remove_handler(temp_handler, group=-1)
+        log.info("Temporary verification handler removed.")
+
+    # ── Step 4: Startup checks ────────────────────────────────────────────
     try:
         target_title = await run_all_checks(
             control_app.bot, userbot_client
@@ -236,14 +300,15 @@ async def _async_main() -> None:
     except Exception as exc:
         log.error("Startup check FAILED: %s", exc)
         await userbot_client.disconnect()
+        await control_app.updater.stop()
+        await control_app.stop()
+        await control_app.shutdown()
         return
 
-    # ── Crash recovery ───────────────────────────────────────────────────
+    # ── Step 5: Crash recovery ────────────────────────────────────────────
     await _try_recover_state(notify_cb=_notify)
 
-    # ── Launch tasks ─────────────────────────────────────────────────────
-    # Control bot is the ONLY persistent task. It runs forever.
-    # The userbot connects/disconnects per arm cycle (managed by scheduler).
+    # ── Step 6: Main loop — Control Bot already running ───────────────────
     control_task = asyncio.create_task(
         _run_control_bot(control_app), name="control_bot")
 

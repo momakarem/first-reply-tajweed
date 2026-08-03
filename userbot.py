@@ -88,8 +88,21 @@ def _create_client(session) -> TelegramClient:
     )
 
 
-async def build_userbot(notify_cb=None) -> TelegramClient:
-    """Initialize userbot with spoofed device identity."""
+async def build_userbot(
+    notify_cb=None,
+    code_callback=None,
+    password_callback=None,
+) -> TelegramClient:
+    """
+    Initialize userbot with spoofed device identity.
+
+    Args:
+        notify_cb: async callable to send status notifications to the owner.
+        code_callback: async callable that returns the verification code string.
+                       If None, Telethon falls back to input() (terminal).
+        password_callback: async callable that returns the 2FA password string.
+                           If None, Telethon falls back to input() (terminal).
+    """
     global _client, _target_entity, _notify_cb
     _notify_cb = notify_cb
 
@@ -105,12 +118,20 @@ async def build_userbot(notify_cb=None) -> TelegramClient:
     else:
         log.info("Using file-based session: %s", config.USERBOT_SESSION)
         _client = _create_client(config.USERBOT_SESSION)
+
+        # Build start() kwargs — only pass callbacks if provided
+        start_kwargs = {"phone": config.PHONE}
+        if code_callback is not None:
+            start_kwargs["code_callback"] = code_callback
+        if password_callback is not None:
+            start_kwargs["password"] = password_callback
+
         try:
-            await _client.start(phone=config.PHONE)
+            await _client.start(**start_kwargs)
         except FloodWaitError as e:
             log.warning("FloodWait %ds — sleeping…", e.seconds)
             await asyncio.sleep(e.seconds + 5)
-            await _client.start(phone=config.PHONE)
+            await _client.start(**start_kwargs)
 
     me = await _client.get_me()
     log.info(
