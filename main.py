@@ -229,6 +229,9 @@ async def _async_main() -> None:
             return
         if _pending_future is not None and not _pending_future.done():
             _pending_future.set_result(update.message.text.strip())
+            # Stop propagation — don't let other handlers process this message
+            from telegram.ext import ApplicationHandlerStop
+            raise ApplicationHandlerStop
 
     # Register temporary handler (group=-1 so it runs before other handlers)
     from telegram.ext import MessageHandler, filters
@@ -244,11 +247,16 @@ async def _async_main() -> None:
         await _notify(
             "🔐 كود التحقق مطلوب!\n\n"
             "تليجرام بعتلك كود تحقق.\n"
+            "⚠️ مهم: ابعت الكود *بمسافات* بين الأرقام عشان تليجرام ما يلغيهوش!\n\n"
+            "مثال: 1 2 3 4 5\n\n"
             "ابعت الكود هنا 👇"
         )
         log.info("Verification code requested via Telegram — waiting for owner reply…")
-        code = await asyncio.wait_for(_pending_future, timeout=300)
-        log.info("Verification code received from owner.")
+        raw = await asyncio.wait_for(_pending_future, timeout=300)
+        # Strip non-digit characters (user sends code with spaces to bypass
+        # Telegram's anti-phishing detection that blocks shared login codes)
+        code = re.sub(r'\D', '', raw)
+        log.info("Verification code received from owner (cleaned: %s chars).", len(code))
         return code
 
     async def password_callback():
