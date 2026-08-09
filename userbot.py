@@ -37,6 +37,7 @@ from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import ReadHistoryRequest
 from telethon.tl.types import MessageMediaPhoto
+from telethon.utils import get_peer_id
 
 import config
 from state import state
@@ -46,6 +47,7 @@ log = logging.getLogger(__name__)
 # ── Module-level references ───────────────────────────────────────────────────
 _client: TelegramClient | None = None
 _target_entity = None
+_target_chat_id: int | None = None  # Normalized chat ID (with -100 prefix for channels)
 _notify_cb = None
 
 # ── Double-response guard (atomic boolean) ────────────────────────────────────
@@ -96,6 +98,10 @@ async def build_userbot(
     """
     Initialize userbot with spoofed device identity.
 
+    Registers a SINGLE persistent NewMessage handler (no chats filter).
+    The handler filters internally by comparing event.chat_id against
+    _target_chat_id, which is updated by switch_target_chat().
+
     Args:
         notify_cb: async callable to send status notifications to the owner.
         code_callback: async callable that returns the verification code string.
@@ -103,7 +109,7 @@ async def build_userbot(
         password_callback: async callable that returns the 2FA password string.
                            If None, Telethon falls back to input() (terminal).
     """
-    global _client, _target_entity, _notify_cb
+    global _client, _target_entity, _target_chat_id, _notify_cb
     _notify_cb = notify_cb
 
     session_string = os.environ.get("TELETHON_SESSION", "").strip()
@@ -148,29 +154,38 @@ async def build_userbot(
         me.first_name, me.id, _DEVICE_MODEL,
     )
 
-    # Resolve target chat entity once
+    # Resolve default target chat entity
     try:
         raw = config.TARGET_CHAT
         try:
             _target_entity = await _client.get_entity(int(raw))
         except ValueError:
             _target_entity = await _client.get_entity(raw)
+
+        # Compute normalized chat ID (with -100 prefix for channels)
+        _target_chat_id = get_peer_id(_target_entity)
         title = getattr(_target_entity, "title", str(_target_entity.id))
-        log.info("Target chat: '%s' (id=%s)", title, _target_entity.id)
+        log.info(
+            "Target chat: '%s' (entity.id=%s, chat_id=%s)",
+            title, _target_entity.id, _target_chat_id,
+        )
     except Exception as exc:
         log.error("Cannot resolve TARGET_CHAT '%s': %s", config.TARGET_CHAT, exc)
         raise
 
-    # ── Event handler: incoming photos ONLY ───────────────────────────────
+    # ── Single persistent event handler (NO chats filter) ─────────────────
+    # Filtering is done INSIDE _on_photo_message by comparing
+    # event.chat_id against _target_chat_id. This avoids issues with
+    # handler re-registration during group switching and disconnect/reconnect.
     _client.add_event_handler(
         _on_photo_message,
-        events.NewMessage(
-            chats=_target_entity,
-            incoming=True,
-            func=lambda e: e.photo,  # photo=True filter
-        ),
+        events.NewMessage(incoming=True),
     )
-    log.info("Stealth event handler registered (incoming photos only).")
+    log.info(
+        "Persistent event handler registered (incoming, internal filtering). "
+        "target_chat_id=%s",
+        _target_chat_id,
+    )
     return _client
 
 
@@ -182,12 +197,20 @@ async def send_typing(duration_seconds: float) -> None:
     if not _client or not _target_entity:
         return
 
+    # Resolve InputPeer once before the loop (avoids repeated lookups
+    # and handles the case where _target_entity changed via switch).
+    try:
+        target_peer = await _client.get_input_entity(_target_entity)
+    except Exception as exc:
+        log.warning("Cannot resolve InputPeer for typing, using entity directly: %s", exc)
+        target_peer = _target_entity
+
     end_time = asyncio.get_event_loop().time() + duration_seconds
     log.info("Typing simulation started for %.0f seconds", duration_seconds)
 
     while asyncio.get_event_loop().time() < end_time:
         try:
-            async with _client.action(_target_entity, "typing"):
+            async with _client.action(target_peer, "typing"):
                 # Each action lasts ~5 seconds; sleep slightly less to maintain overlap
                 remaining = end_time - asyncio.get_event_loop().time()
                 await asyncio.sleep(min(4.5, max(0.1, remaining)))
@@ -206,8 +229,12 @@ async def mark_as_read(msg_id: int) -> None:
     if not _client or not _target_entity:
         return
     try:
+        # Use get_input_entity to get the correct InputPeer type.
+        # This prevents the "Invalid Peer" error that occurs when
+        # _target_entity is a full Channel object after a group switch.
+        input_peer = await _client.get_input_entity(_target_entity)
         await _client(ReadHistoryRequest(
-            peer=_target_entity,
+            peer=input_peer,
             max_id=msg_id,
         ))
         log.info("ReadHistory sent (max_id=%d)", msg_id)
@@ -268,19 +295,25 @@ async def switch_target_chat(chat_id: str) -> str:
     """
     Switch the target chat to a new group at runtime.
 
-    Resolves the new entity, re-registers the event handler on the new chat,
-    and returns the chat title.
+    Updates _target_entity and _target_chat_id. Does NOT re-register
+    the event handler — the persistent handler filters internally by
+    comparing event.chat_id against _target_chat_id.
 
     Called from the control bot after group selection via inline keyboard.
     """
-    global _target_entity
+    global _target_entity, _target_chat_id
 
     if not _client:
         raise RuntimeError("Client not initialized — run build_userbot() first")
 
     # Ensure client is connected
     if not _client.is_connected():
+        log.info("Client disconnected — reconnecting for group switch...")
         await _client.connect()
+
+    # Verify authorization after reconnect
+    if not await _client.is_user_authorized():
+        raise RuntimeError("Session lost authorization — re-run create_session.py")
 
     # Resolve new entity
     try:
@@ -292,23 +325,18 @@ async def switch_target_chat(chat_id: str) -> str:
         log.error("Cannot resolve chat_id '%s': %s", chat_id, exc)
         raise
 
+    # Compute normalized chat ID (with -100 prefix for channels)
+    new_chat_id = get_peer_id(new_entity)
     title = getattr(new_entity, "title", str(new_entity.id))
-    log.info("Switching target chat to: '%s' (id=%s)", title, new_entity.id)
 
-    # Remove ALL existing NewMessage handlers, then re-register on new entity
-    _client.remove_event_handler(_on_photo_message)
-
+    old_chat_id = _target_chat_id
     _target_entity = new_entity
+    _target_chat_id = new_chat_id
 
-    _client.add_event_handler(
-        _on_photo_message,
-        events.NewMessage(
-            chats=_target_entity,
-            incoming=True,
-            func=lambda e: e.photo,
-        ),
+    log.info(
+        "Target chat switched: '%s' (entity.id=%s, chat_id=%s, prev_chat_id=%s)",
+        title, new_entity.id, _target_chat_id, old_chat_id,
     )
-    log.info("Event handler re-registered on '%s'", title)
 
     # Update state
     state.target_chat_name = title
@@ -317,17 +345,23 @@ async def switch_target_chat(chat_id: str) -> str:
 
 async def _on_photo_message(event: events.NewMessage.Event) -> None:
     """
-    Hot-path handler for incoming photos — ZERO DELAY mode.
+    Persistent handler for ALL incoming messages — ZERO DELAY mode.
+
+    Filters internally by chat_id, photo type, sender, and caption.
+    This handler is registered ONCE at startup without a chats filter,
+    so it survives disconnect/reconnect and group switching.
 
     Flow:
       1. Guard: skip if not monitoring or already replied
-      2. Apply sender/caption filters
-      3. Set double-response guard (atomic)
-      4. ReadHistoryRequest (mark as read) — FIRST action
-      5. Reply INSTANTLY — NO delay, NO sleep
-      6. Record latency (actual network time only)
-      7. Notify owner
-      8. Disconnect userbot (control bot stays alive)
+      2. Chat ID filter: skip if not from the target group
+      3. Photo type check
+      4. Apply sender/caption filters
+      5. Set double-response guard (atomic)
+      6. ReadHistoryRequest (mark as read) — FIRST action
+      7. Reply INSTANTLY — NO delay, NO sleep
+      8. Record latency (actual network time only)
+      9. Notify owner
+     10. Disconnect userbot (control bot stays alive)
     """
     global _reply_fired
 
@@ -337,20 +371,51 @@ async def _on_photo_message(event: events.NewMessage.Event) -> None:
     if state.reply_sent or _reply_fired:
         return
 
+    # ── Chat ID filter (internal, replaces Telethon chats= filter) ────────
+    if _target_chat_id is None:
+        return
+
+    event_chat_id = event.chat_id
+    if event_chat_id != _target_chat_id:
+        # Log only when monitoring is active — helps diagnose wrong-group issues
+        log.debug(
+            "MESSAGE_IGNORED | reason=wrong_chat | event_chat_id=%s | target_chat_id=%s | msg_id=%s",
+            event_chat_id, _target_chat_id, event.message.id,
+        )
+        return
+
     msg = event.message
 
     # ── Photo type check (belt-and-suspenders) ────────────────────────────
     if not isinstance(msg.media, MessageMediaPhoto):
+        log.debug(
+            "MESSAGE_IGNORED | reason=not_photo | chat_id=%s | msg_id=%s | has_media=%s",
+            event_chat_id, msg.id, type(msg.media).__name__ if msg.media else "None",
+        )
         return
 
     # ── Sender whitelist ──────────────────────────────────────────────────
     if config.ALLOWED_SENDER_IDS and msg.sender_id not in config.ALLOWED_SENDER_IDS:
+        log.debug(
+            "MESSAGE_IGNORED | reason=sender_not_allowed | chat_id=%s | msg_id=%s | sender_id=%s",
+            event_chat_id, msg.id, msg.sender_id,
+        )
         return
 
     # ── Caption keyword filter ────────────────────────────────────────────
     if config.CAPTION_KEYWORD:
         if config.CAPTION_KEYWORD not in (msg.message or "").lower():
+            log.debug(
+                "MESSAGE_IGNORED | reason=caption_mismatch | chat_id=%s | msg_id=%s",
+                event_chat_id, msg.id,
+            )
             return
+
+    # ── PHOTO MATCH — all filters passed ──────────────────────────────────
+    log.info(
+        "PHOTO_MATCH | chat_id=%s | msg_id=%s | sender_id=%s",
+        event_chat_id, msg.id, msg.sender_id,
+    )
 
     # ══════════════════════════════════════════════════════════════════════
     # EXECUTION — t0 starts NOW (event arrival)
@@ -396,7 +461,7 @@ async def _on_photo_message(event: events.NewMessage.Event) -> None:
     state.mark_sent(total_latency_ms, now, msg.id)
 
     log.info(
-        "✅ Reply sent | '%s' | msg_id=%d | latency=%.0f ms | at=%s",
+        "✅ REPLY_SENT | '%s' | msg_id=%d | latency=%.0f ms | at=%s",
         reply_text, msg.id, total_latency_ms,
         now.strftime("%H:%M:%S.%f"),
     )
