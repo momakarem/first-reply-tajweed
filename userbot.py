@@ -35,7 +35,6 @@ from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from telethon.sessions import StringSession
-from telethon.tl.functions.messages import ReadHistoryRequest
 from telethon.tl.types import MessageMediaPhoto
 from telethon.utils import get_peer_id
 
@@ -225,21 +224,23 @@ async def send_typing(duration_seconds: float) -> None:
 
 
 async def mark_as_read(msg_id: int) -> None:
-    """Send ReadHistoryRequest to mark messages as read (human behavior)."""
+    """Mark messages as read using Telethon's high-level API.
+
+    Uses send_read_acknowledge() which automatically handles both
+    channels/supergroups (channels.ReadHistoryRequest) and regular
+    chats (messages.ReadHistoryRequest). The raw messages.ReadHistoryRequest
+    fails with "Invalid Peer" for channels/supergroups.
+    """
     if not _client or not _target_entity:
         return
     try:
-        # Use get_input_entity to get the correct InputPeer type.
-        # This prevents the "Invalid Peer" error that occurs when
-        # _target_entity is a full Channel object after a group switch.
-        input_peer = await _client.get_input_entity(_target_entity)
-        await _client(ReadHistoryRequest(
-            peer=input_peer,
+        await _client.send_read_acknowledge(
+            _target_entity,
             max_id=msg_id,
-        ))
+        )
         log.info("ReadHistory sent (max_id=%d)", msg_id)
     except Exception as exc:
-        log.warning("ReadHistoryRequest failed: %s", exc)
+        log.warning("ReadHistory failed: %s", exc)
 
 
 async def disconnect_userbot() -> None:
